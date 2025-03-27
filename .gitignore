@@ -1,0 +1,25 @@
+# Binary output
+/build/
+
+# IDE files
+.idea/
+.vscode/
+*.sublime-*
+
+# Dependency directories
+/vendor/
+
+# Environment files
+.env
+.env.local
+
+# Log files
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# AI files
+CLAUDE.md
+/info/

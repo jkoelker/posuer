@@ -1,0 +1,108 @@
+---
+version: "2"
+
+run:
+  tests: true
+
+linters:
+  default: all
+
+  disable:
+    - depguard
+    - exhaustruct
+
+  settings:
+    exhaustive:
+      default-signifies-exhaustive: true
+
+    funlen:
+      lines: 100
+      statements: 50
+
+    ireturn:
+      allow:
+        - error
+        - generic
+        - context.Context
+        - github.com/mark3labs/mcp-go/client.MCPClient
+        - github.com/jkoelker/posuer/pkg/isolate.Isolator
+
+    tagliatelle:
+      case:
+        rules:
+          json: snake
+          yaml: snake
+
+    varnamelen:
+      ignore-type-assert-ok: true
+      ignore-map-index-ok: true
+      ignore-chan-recv-ok: true
+
+    wrapcheck:
+      ignore-sigs:
+        - .Errorf(
+        - errors.New(
+        - errors.Unwrap(
+        - .Wrap(
+        - .Wrapf(
+        - .WrapError(
+        - .WrapWarn(
+        - .LogWrap(
+
+  exclusions:
+    generated: lax
+
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+
+    rules:
+      - linters:
+          - lll
+        source: '^//go:generate '
+
+      - linters:
+          - dupl
+          - err113
+        path: _test\.go
+
+      - linters:
+          - funlen
+          - maintidx
+        source: ^func Test
+
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+formatters:
+  enable:
+    - gci
+    - gofmt
+    - gofumpt
+    - goimports
+
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - prefix(github.com/jkoelker/posuer)
+
+    goimports:
+      local-prefixes:
+        - github.com/jkoelker/posuer
+
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

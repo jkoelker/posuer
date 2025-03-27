@@ -1,0 +1,112 @@
+# Posuer configuration file
+# This is an example configuration file that demonstrates the available options
+# yamllint disable rule:comments-indentation
+
+---
+# Server configurations
+servers:
+  # Default: All tools enabled (no filtering)
+  - name: filesystem
+    type: stdio
+    command: npx
+    args:
+      - -y
+      - "@modelcontextprotocol/server-filesystem"
+      - "/tmp"
+
+  # Enable only specific tools (legacy format)
+  # - name: server-memory
+  #   type: stdio
+  #   command: npx
+  #   args:
+  #     - -y
+  #     - "@modelcontextprotocol/server-memory"
+  #   enable:
+  #     - create_entities
+  #     - read_graph
+  #     - search_nodes
+
+  # Enable specific capabilities by type with list syntax
+  # - name: server-memory
+  #   type: stdio
+  #   command: npx
+  #   args:
+  #     - -y
+  #     - "@modelcontextprotocol/server-memory"
+  #   enable:
+  #     tools:
+  #       - create_entities
+  #       - read_graph
+
+  # Disable specific tools (legacy format)
+  # - name: server-filesystem-limited
+  #   type: stdio
+  #   command: npx
+  #   args:
+  #     - -y
+  #     - "@modelcontextprotocol/server-filesystem"
+  #     - "/tmp"
+  #   disable:
+  #     - write_file
+  #     - move_file
+
+  # Disable specific capabilities by type
+  # - name: server-filesystem-limited
+  #   type: stdio
+  #   command: npx
+  #   args:
+  #     - -y
+  #     - "@modelcontextprotocol/server-filesystem"
+  #     - "/tmp"
+  #   disable:
+  #     tools:
+  #       - write_file
+  #       - move_file
+
+  # Enable with boolean value for entire server
+  # - name: server-memory
+  #   type: stdio
+  #   command: npx
+  #   args:
+  #     - -y
+  #     - "@modelcontextprotocol/server-memory"
+  #   enable: true
+
+  # Disable with boolean value for entire server
+  # - name: server-memory
+  #   type: stdio
+  #   command: npx
+  #   args:
+  #     - -y
+  #     - "@modelcontextprotocol/server-memory"
+  #   disable: true
+
+  # You can also include other config files
+  # - ~/other-servers.yaml
+  # - ~/.config/Claude/claude_desktop_config.json
+
+  # Simple container format (just the image name)
+  # - name: filesystem-container
+  #   type: stdio
+  #   command: npx
+  #   args:
+  #     - -y
+  #     - "@modelcontextprotocol/server-filesystem"
+  #     - "/tmp"
+  #   container: "docker.io/alpine:latest"
+
+  # Full container configuration
+  # - name: database
+  #   type: stdio
+  #   command: npx
+  #   args:
+  #     - -y
+  #     - "@modelcontextprotocol/server-sqlite"
+  #   container:
+  #     image: node:18-alpine
+  #     volumes:
+  #       "/data": "/app/data"
+  #     env:
+  #       DB_PATH: "/app/data/database.sqlite"
+  #     network: host
+  #     workdir: "/app"
