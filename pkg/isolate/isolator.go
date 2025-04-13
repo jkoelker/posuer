@@ -117,11 +117,17 @@ func defaultContainerIsolator(cfg config.Server) (client.MCPClient, error) {
 	}
 
 	// Set the default image
-	server.Container.Image = DefaultImageForCommand(cfg.Command)
+	if server.Container.Image == "" {
+		server.Container.Image = DefaultImageForCommand(cfg.Command)
+	}
 
 	// Ensure Env is initialized
 	if server.Container.Env == nil {
 		server.Container.Env = make(map[string]string)
+	}
+
+	if server.Container.Volumes == nil {
+		server.Container.Volumes = make(map[string]string)
 	}
 
 	// Get default volumes for the command
@@ -130,17 +136,9 @@ func defaultContainerIsolator(cfg config.Server) (client.MCPClient, error) {
 		return nil, fmt.Errorf("failed to get default volumes for command %s: %w", cfg.Command, err)
 	}
 
-	// Add the volumes to the container configuration
-	if len(volumes) > 0 {
-		// Ensure Volumes is initialized
-		if server.Container.Volumes == nil {
-			server.Container.Volumes = make(map[string]string)
-		}
-
-		// Add each volume mapping
-		for k, v := range volumes {
-			server.Container.Volumes[k] = v
-		}
+	// Add each volume mapping
+	for k, v := range volumes {
+		server.Container.Volumes[k] = v
 	}
 
 	if server.Container.WorkDir == "" {
@@ -171,7 +169,7 @@ func Client(cfg config.Server) (client.MCPClient, error) {
 		return noopIsolator(cfg)
 
 	case cfg.Container != nil && cfg.Container.IsConfigured():
-		return containerIsolator(cfg)
+		return defaultContainerIsolator(cfg)
 
 	case DefaultImageForCommand(cfg.Command) != "":
 		return defaultContainerIsolator(cfg)
