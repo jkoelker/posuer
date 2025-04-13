@@ -1,7 +1,12 @@
 # Posuer: MCP Manager and Interposer
 
-A Model Context Protocol (MCP) manager and interposer that enables Large
-Language Models to seamlessly interact with multiple MCP servers.
+A powerful Model Context Protocol (MCP) manager that enhances Large Language Models with:
+
+✅ **Docker Containerization** - Run MCP servers in isolated containers with automatic detection
+✅ **Dynamic Config Reloading** - Update server configurations without restarting
+✅ **Multi-Server Aggregation** - Combine tools and resources from different servers
+✅ **Smart Capability Routing** - Direct requests to appropriate backend servers
+✅ **Advanced Configuration** - Fine-grained control over tool exposure
 
 ## Project Vision
 
