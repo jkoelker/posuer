@@ -2,11 +2,11 @@
 
 A powerful Model Context Protocol (MCP) manager that enhances Large Language Models with:
 
-✅ **Docker Containerization** - Run MCP servers in isolated containers with automatic detection
-✅ **Dynamic Config Reloading** - Update server configurations without restarting
-✅ **Multi-Server Aggregation** - Combine tools and resources from different servers
-✅ **Smart Capability Routing** - Direct requests to appropriate backend servers
-✅ **Advanced Configuration** - Fine-grained control over tool exposure
+- **Docker Containerization** - Run MCP servers in isolated containers with automatic detection
+- **Dynamic Config Reloading** - Update server configurations without restarting
+- **Multi-Server Aggregation** - Combine tools and resources from different servers
+- **Smart Capability Routing** - Direct requests to appropriate backend servers
+- **Advanced Configuration** - Fine-grained control over tool exposure
 
 ## Project Vision
 
