@@ -238,15 +238,19 @@ func (i *Interposer) addClientTools(
 			return nil, "", fmt.Errorf("failed to list tools: %w", err)
 		}
 
+		for idx, tool := range result.Tools {
+			if tool.InputSchema.Properties == nil {
+				// NOTE until upstream merges the `omitempty` fix.
+				tool.InputSchema.Properties = make(map[string]any)
+			}
+
+			result.Tools[idx] = tool
+		}
+
 		return result.Tools, string(result.NextCursor), nil
 	}
 
 	create := func(tool mcp.Tool) server.ToolHandlerFunc {
-		// NOTE until upstream merges the `omitempty` fix.
-		if tool.InputSchema.Properties == nil {
-			tool.InputSchema.Properties = make(map[string]any)
-		}
-
 		return handleTool(tool, mcpClient)
 	}
 
