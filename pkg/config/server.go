@@ -76,6 +76,51 @@ func (s *Server) Disabled() bool {
 	return s.isExplicitlyDisabled() || s.hasEmptyEnabledCapabilities() || s.hasAllEmptyCapabilityLists()
 }
 
+// Enabled returns true if the item is enabled for the server.
+func (s *Server) Enabled(capability CapabilityType, name string) bool {
+	if s.Disabled() {
+		return false
+	}
+
+	if s.disabled(capability, name) {
+		return false
+	}
+
+	if s.Enable == nil {
+		// If no enable configuration exists, default to enabled
+		return true
+	}
+
+	if s.Enable.All {
+		return true
+	}
+
+	// If we have enable.Capabilities map
+	if s.Enable.Capabilities != nil {
+		// Check if this specific capability+name is in the enabled list
+		if enabled, ok := s.Enable.Capabilities[capability]; ok {
+			for _, enabledName := range enabled {
+				if enabledName == name {
+					return true
+				}
+			}
+			// The capability type exists in Enable.Capabilities but this
+			// specific name is not in the list
+			return false
+		}
+	}
+
+	// If enable exists but doesn't contain this capability type,
+	// we're using a whitelist approach, so return false
+	if len(s.Enable.Capabilities) > 0 {
+		return false
+	}
+
+	// Empty enable configuration means nothing is explicitly enabled,
+	// which means everything is enabled by default
+	return true
+}
+
 // isExplicitlyDisabled checks if the server is explicitly disabled.
 func (s *Server) isExplicitlyDisabled() bool {
 	return s.Disable != nil && s.Disable.All
@@ -126,49 +171,4 @@ func (s *Server) disabled(capability CapabilityType, name string) bool {
 	}
 
 	return false
-}
-
-// Enabled returns true if the item is enabled for the server.
-func (s *Server) Enabled(capability CapabilityType, name string) bool {
-	if s.Disabled() {
-		return false
-	}
-
-	if s.disabled(capability, name) {
-		return false
-	}
-
-	if s.Enable == nil {
-		// If no enable configuration exists, default to enabled
-		return true
-	}
-
-	if s.Enable.All {
-		return true
-	}
-
-	// If we have enable.Capabilities map
-	if s.Enable.Capabilities != nil {
-		// Check if this specific capability+name is in the enabled list
-		if enabled, ok := s.Enable.Capabilities[capability]; ok {
-			for _, enabledName := range enabled {
-				if enabledName == name {
-					return true
-				}
-			}
-			// The capability type exists in Enable.Capabilities but this
-			// specific name is not in the list
-			return false
-		}
-	}
-
-	// If enable exists but doesn't contain this capability type,
-	// we're using a whitelist approach, so return false
-	if len(s.Enable.Capabilities) > 0 {
-		return false
-	}
-
-	// Empty enable configuration means nothing is explicitly enabled,
-	// which means everything is enabled by default
-	return true
 }

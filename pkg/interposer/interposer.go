@@ -107,46 +107,6 @@ func (i *Interposer) AddBackend(
 	return nil
 }
 
-// addClientCapabilities registers all capabilities from the client with our server.
-func (i *Interposer) addClientCapabilities(
-	ctx context.Context,
-	mcpClient client.MCPClient,
-	result *mcp.InitializeResult,
-	cfg config.Server,
-) {
-	// Check if the entire server is disabled
-	if cfg.Disabled() {
-		log.Printf("Server %s is disabled by configuration", cfg.Name)
-
-		return
-	}
-
-	// Add tools if supported and not disabled
-	if result.Capabilities.Tools != nil {
-		if err := i.addClientTools(ctx, mcpClient, cfg); err != nil {
-			log.Printf("Warning: failed to add tools from %s: %v", cfg.Name, err)
-		}
-	}
-
-	// Add prompts if supported
-	if result.Capabilities.Prompts != nil {
-		if err := i.addClientPrompts(ctx, mcpClient, cfg); err != nil {
-			log.Printf("Warning: failed to add prompts from %s: %v", cfg.Name, err)
-		}
-	}
-
-	// Add resources if supported
-	if result.Capabilities.Resources != nil {
-		if err := i.addClientResources(ctx, mcpClient, cfg); err != nil {
-			log.Printf("Warning: failed to add resources from %s: %v", cfg.Name, err)
-		}
-
-		if err := i.addClientResourceTemplates(ctx, mcpClient, cfg); err != nil {
-			log.Printf("Warning: failed to add resource templates from %s: %v", cfg.Name, err)
-		}
-	}
-}
-
 // RegisterTool registers a tool and tracks its source.
 func (i *Interposer) RegisterTool(
 	backendName string,
@@ -185,14 +145,6 @@ func (i *Interposer) RegisterResourceTemplate(
 ) {
 	i.server.AddResourceTemplate(template, handler)
 	i.registry.AddCapability(backendName, "template", template.Name)
-}
-
-// sendChangeNotification sends a capability change notification to clients.
-func (i *Interposer) sendChangeNotification(ctx context.Context, notificationType string) {
-	params := map[string]any{}
-	if err := i.server.SendNotificationToClient(ctx, notificationType, params); err != nil {
-		log.Printf("Warning: failed to send %s notification: %v", notificationType, err)
-	}
 }
 
 // RemoveTrackedCapabilities removes all capabilities that came from a specific backend
@@ -242,6 +194,445 @@ func extractRawCapabilityNames(
 	}
 
 	return result
+}
+
+// UpdateCapabilityConfig updates the capability configuration for a specific backend
+// without restarting the connection. This is useful when only enable/disable lists change.
+func (i *Interposer) UpdateCapabilityConfig(
+	ctx context.Context,
+	name string,
+	oldConfig config.Server,
+	newConfig config.Server,
+) error {
+	// Get the client
+	i.mu.RLock()
+	mcpClient, exists := i.clients[name]
+	i.mu.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("%w: %s", ErrBackendNotFound, name)
+	}
+
+	// If the new config disables the entire server, remove it
+	if newConfig.Disabled() {
+		log.Printf("Server %s is now disabled, removing", name)
+		i.removeBackend(ctx, name)
+
+		return nil
+	}
+
+	// Get current capabilities from the registry
+	capsByType := i.registry.GetCapabilitiesForBackend(name)
+
+	// Track changes for notifications
+	toolsChanged := i.processDisabledTools(name, capsByType, newConfig)
+	promptsChanged := false
+	resourcesChanged := false
+	templatesChanged := false
+
+	// For capabilities that are now enabled but weren't before, we need to
+	// re-initialize the client to get the full list of capabilities
+	needsReinit := !config.CompareCapability(oldConfig.Enable, newConfig.Enable) ||
+		!config.CompareCapability(oldConfig.Disable, newConfig.Disable)
+
+	// Re-initialize if needed
+	if needsReinit {
+		toolsChanged, promptsChanged, resourcesChanged, templatesChanged = i.handleReinitCapabilities(
+			ctx, name, mcpClient, capsByType, newConfig, toolsChanged, promptsChanged, resourcesChanged, templatesChanged,
+		)
+	}
+
+	// Send notifications for changes if needed
+	if toolsChanged {
+		log.Printf("Publishing tools change notification for %s", name)
+		i.sendChangeNotification(ctx, "toolsChange")
+	}
+
+	if promptsChanged {
+		log.Printf("Publishing prompts change notification for %s", name)
+		i.sendChangeNotification(ctx, "promptsChange")
+	}
+
+	if resourcesChanged || templatesChanged {
+		log.Printf("Publishing resources change notification for %s", name)
+		i.sendChangeNotification(ctx, "resourcesChange")
+	}
+
+	return nil
+}
+
+// checkCapabilityChanges checks if a backend has capabilities of specific types.
+func checkCapabilityChanges(capsByType map[string][]string) (bool, bool, bool, bool) {
+	toolsChanged := false
+	promptsChanged := false
+	resourcesChanged := false
+	templatesChanged := false
+
+	if len(capsByType) > 0 {
+		if _, has := capsByType["tool"]; has {
+			toolsChanged = true
+		}
+
+		if _, has := capsByType["prompt"]; has {
+			promptsChanged = true
+		}
+
+		if _, has := capsByType["resource"]; has {
+			resourcesChanged = true
+		}
+
+		if _, has := capsByType["template"]; has {
+			templatesChanged = true
+		}
+	}
+
+	return toolsChanged, promptsChanged, resourcesChanged, templatesChanged
+}
+
+// createDefaultOldConfig creates a default config for comparison purposes.
+func createDefaultOldConfig(name string, newConfig config.Server) config.Server {
+	return config.Server{
+		Name:    name,
+		Type:    newConfig.Type,
+		Command: newConfig.Command,
+		Args:    newConfig.Args,
+		Env:     newConfig.Env,
+		URL:     newConfig.URL,
+		Enable:  &config.Capability{},
+		Disable: &config.Capability{},
+	}
+}
+
+// capabilityChanges tracks changes to different capability types.
+type capabilityChanges struct {
+	toolsChanged     bool
+	promptsChanged   bool
+	resourcesChanged bool
+	templatesChanged bool
+}
+
+// updateChanges updates capability change flags based on new changes.
+func (c *capabilityChanges) updateChanges(tc, pc, rc, tec bool) {
+	c.toolsChanged = c.toolsChanged || tc
+	c.promptsChanged = c.promptsChanged || pc
+	c.resourcesChanged = c.resourcesChanged || rc
+	c.templatesChanged = c.templatesChanged || tec
+}
+
+// Reconfigure updates the interposer with a new set of server configurations.
+func (i *Interposer) Reconfigure(ctx context.Context, serverConfigs []config.Server) error {
+	// Collect current backends and prepare new config map
+	currentBackends := i.getCurrentBackends()
+	newConfigMap := prepareNewConfigMap(serverConfigs)
+
+	// Track changes for notifications
+	changes := &capabilityChanges{}
+
+	// Process backends in three phases: removed, updated, and new
+	i.processRemovedBackends(ctx, currentBackends, newConfigMap, changes)
+	i.processUpdatedBackends(ctx, currentBackends, newConfigMap, changes)
+	i.processNewBackends(ctx, newConfigMap, changes)
+
+	// Send notifications for all changes
+	i.sendNotifications(ctx,
+		changes.toolsChanged,
+		changes.promptsChanged,
+		changes.resourcesChanged,
+		changes.templatesChanged)
+
+	return nil
+}
+
+// Close closes all connections.
+func (i *Interposer) Close() error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	for name, client := range i.clients {
+		if err := client.Close(); err != nil {
+			log.Printf("Error closing client %s: %v", name, err)
+		}
+	}
+
+	return nil
+}
+
+// addClientCapabilities registers all capabilities from the client with our server.
+func (i *Interposer) addClientCapabilities(
+	ctx context.Context,
+	mcpClient client.MCPClient,
+	result *mcp.InitializeResult,
+	cfg config.Server,
+) {
+	// Check if the entire server is disabled
+	if cfg.Disabled() {
+		log.Printf("Server %s is disabled by configuration", cfg.Name)
+
+		return
+	}
+
+	// Add tools if supported and not disabled
+	if result.Capabilities.Tools != nil {
+		if err := i.addClientTools(ctx, mcpClient, cfg); err != nil {
+			log.Printf("Warning: failed to add tools from %s: %v", cfg.Name, err)
+		}
+	}
+
+	// Add prompts if supported
+	if result.Capabilities.Prompts != nil {
+		if err := i.addClientPrompts(ctx, mcpClient, cfg); err != nil {
+			log.Printf("Warning: failed to add prompts from %s: %v", cfg.Name, err)
+		}
+	}
+
+	// Add resources if supported
+	if result.Capabilities.Resources != nil {
+		if err := i.addClientResources(ctx, mcpClient, cfg); err != nil {
+			log.Printf("Warning: failed to add resources from %s: %v", cfg.Name, err)
+		}
+
+		if err := i.addClientResourceTemplates(ctx, mcpClient, cfg); err != nil {
+			log.Printf("Warning: failed to add resource templates from %s: %v", cfg.Name, err)
+		}
+	}
+}
+
+// getCurrentBackends returns a map of current backend names.
+func (i *Interposer) getCurrentBackends() map[string]bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+
+	currentBackends := make(map[string]bool)
+	for name := range i.clients {
+		currentBackends[name] = true
+	}
+
+	return currentBackends
+}
+
+// handleReinitCapabilities handles the re-initialization of capabilities for a backend.
+func (i *Interposer) handleReinitCapabilities(
+	ctx context.Context,
+	name string,
+	mcpClient client.MCPClient,
+	capsByType map[string][]string,
+	newConfig config.Server,
+	toolsChanged, promptsChanged, resourcesChanged, templatesChanged bool,
+) (bool, bool, bool, bool) {
+	log.Printf("Capability configuration changed for backend %s, re-initializing", name)
+
+	// Initialize the client to get capability info
+	initResult, err := Initialize(ctx, mcpClient, i.ImplementationInfo(), name)
+	if err != nil {
+		log.Printf("Warning: failed to re-initialize client: %v", err)
+
+		return toolsChanged, promptsChanged, resourcesChanged, templatesChanged
+	}
+
+	// Process tools if supported
+	if initResult.Capabilities.Tools != nil {
+		toolsChanged = i.handleToolReinit(ctx, name, mcpClient, capsByType, newConfig, toolsChanged)
+	}
+
+	// Process prompts if supported
+	if initResult.Capabilities.Prompts != nil {
+		promptsChanged = i.handlePromptReinit(ctx, name, mcpClient, capsByType, newConfig, promptsChanged)
+	}
+
+	// Process resources if supported
+	if initResult.Capabilities.Resources != nil {
+		resourcesChanged, templatesChanged = i.handleResourceReinit(
+			ctx, name, mcpClient, capsByType, newConfig, resourcesChanged, templatesChanged,
+		)
+	}
+
+	return toolsChanged, promptsChanged, resourcesChanged, templatesChanged
+}
+
+// handleToolReinit processes tools during re-initialization.
+func (i *Interposer) handleToolReinit(
+	ctx context.Context,
+	name string,
+	mcpClient client.MCPClient,
+	capsByType map[string][]string,
+	newConfig config.Server,
+	toolsChanged bool,
+) bool {
+	currentTools := extractRawCapabilityNames(name, capsByType, "tool")
+
+	changed, err := i.processNewTools(ctx, name, mcpClient, currentTools, newConfig)
+	if err != nil {
+		log.Printf("Warning: error processing tools: %v", err)
+	}
+
+	return toolsChanged || changed
+}
+
+// handlePromptReinit processes prompts during re-initialization.
+func (i *Interposer) handlePromptReinit(
+	ctx context.Context,
+	name string,
+	mcpClient client.MCPClient,
+	capsByType map[string][]string,
+	newConfig config.Server,
+	promptsChanged bool,
+) bool {
+	changed, err := i.processNewPrompts(ctx, name, mcpClient, capsByType, newConfig)
+	if err != nil {
+		log.Printf("Warning: error processing prompts: %v", err)
+	}
+
+	return promptsChanged || changed
+}
+
+// handleResourceReinit processes resources and templates during re-initialization.
+func (i *Interposer) handleResourceReinit(
+	ctx context.Context,
+	name string,
+	mcpClient client.MCPClient,
+	capsByType map[string][]string,
+	newConfig config.Server,
+	resourcesChanged, templatesChanged bool,
+) (bool, bool) {
+	// Process resources
+	resChanged, err := i.processNewResources(ctx, name, mcpClient, capsByType, newConfig)
+	if err != nil {
+		log.Printf("Warning: error processing resources: %v", err)
+	}
+
+	// Process resource templates
+	tempChanged, err := i.processNewTemplates(ctx, name, mcpClient, capsByType, newConfig)
+	if err != nil {
+		log.Printf("Warning: error processing resource templates: %v", err)
+	}
+
+	return resourcesChanged || resChanged, templatesChanged || tempChanged
+}
+
+// prepareNewConfigMap creates a map of non-disabled configurations by name.
+func prepareNewConfigMap(serverConfigs []config.Server) map[string]config.Server {
+	newConfigMap := make(map[string]config.Server)
+
+	for _, cfg := range serverConfigs {
+		if !cfg.Disabled() {
+			newConfigMap[cfg.Name] = cfg
+		}
+	}
+
+	return newConfigMap
+}
+
+// processRemovedBackends handles backends that no longer exist in the config.
+func (i *Interposer) processRemovedBackends(
+	ctx context.Context,
+	currentBackends map[string]bool,
+	newConfigMap map[string]config.Server,
+	changes *capabilityChanges,
+) {
+	// Find backends that exist in current but not in new config
+	for name, exists := range currentBackends {
+		if !exists {
+			continue // Skip if already processed
+		}
+
+		// If backend doesn't exist in new config, remove it
+		if _, hasNewConfig := newConfigMap[name]; !hasNewConfig {
+			tc, pc, rc, tec := i.processRemovedBackend(ctx, name)
+			changes.updateChanges(tc, pc, rc, tec)
+
+			// Mark as processed
+			currentBackends[name] = false
+		}
+	}
+}
+
+// processUpdatedBackends handles backends that exist in both current and new configs.
+func (i *Interposer) processUpdatedBackends(
+	ctx context.Context,
+	currentBackends map[string]bool,
+	newConfigMap map[string]config.Server,
+	changes *capabilityChanges,
+) {
+	for name, exists := range currentBackends {
+		if !exists {
+			continue // Skip if already processed
+		}
+
+		newConfig, hasNewConfig := newConfigMap[name]
+		if !hasNewConfig {
+			continue // Skip if not in new config (should be handled by processRemovedBackends)
+		}
+
+		// Verify client still exists
+		clientExists := i.verifyClientExists(name)
+		if !clientExists {
+			log.Printf("Client %s not found in clients map, recreating", name)
+			// Mark for recreation as a new backend
+			currentBackends[name] = false
+
+			continue
+		}
+
+		// Handle existing backend update
+		i.updateExistingBackend(ctx, name, newConfig, changes)
+
+		// Mark as processed
+		currentBackends[name] = false
+
+		delete(newConfigMap, name)
+	}
+}
+
+// sendChangeNotification sends a capability change notification to clients.
+func (i *Interposer) sendChangeNotification(ctx context.Context, notificationType string) {
+	params := map[string]any{}
+	if err := i.server.SendNotificationToClient(ctx, notificationType, params); err != nil {
+		log.Printf("Warning: failed to send %s notification: %v", notificationType, err)
+	}
+}
+
+// verifyClientExists checks if a client exists in the clients map.
+func (i *Interposer) verifyClientExists(name string) bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+
+	_, exists := i.clients[name]
+
+	return exists
+}
+
+// updateExistingBackend updates an existing backend with new configuration.
+func (i *Interposer) updateExistingBackend(
+	ctx context.Context,
+	name string,
+	newConfig config.Server,
+	changes *capabilityChanges,
+) {
+	// For now, we always do a full restart since we can't easily
+	// compare all the client parameters
+	oldConfig := createDefaultOldConfig(name, newConfig)
+	needsFullRestart := true
+
+	if needsFullRestart {
+		tc, pc, rc, tec := i.processBackendRestart(ctx, name, newConfig)
+		changes.updateChanges(tc, pc, rc, tec)
+	} else {
+		// Only capability settings have changed
+		tc, pc, rc, tec := i.processCapabilityUpdate(ctx, name, oldConfig, newConfig)
+		changes.updateChanges(tc, pc, rc, tec)
+	}
+}
+
+// processNewBackends handles backends that only exist in the new config.
+func (i *Interposer) processNewBackends(
+	ctx context.Context,
+	newConfigMap map[string]config.Server,
+	changes *capabilityChanges,
+) {
+	for name, config := range newConfigMap {
+		tc, pc, rc, tec := i.processNewBackend(ctx, name, config)
+		changes.updateChanges(tc, pc, rc, tec)
+	}
 }
 
 // processDisabledTools handles tools that need to be disabled.
@@ -424,359 +815,6 @@ func (i *Interposer) processNewTemplates(
 	return templatesChanged, nil
 }
 
-// UpdateCapabilityConfig updates the capability configuration for a specific backend
-// without restarting the connection. This is useful when only enable/disable lists change.
-func (i *Interposer) UpdateCapabilityConfig(
-	ctx context.Context,
-	name string,
-	oldConfig config.Server,
-	newConfig config.Server,
-) error {
-	// Get the client
-	i.mu.RLock()
-	mcpClient, exists := i.clients[name]
-	i.mu.RUnlock()
-
-	if !exists {
-		return fmt.Errorf("%w: %s", ErrBackendNotFound, name)
-	}
-
-	// If the new config disables the entire server, remove it
-	if newConfig.Disabled() {
-		log.Printf("Server %s is now disabled, removing", name)
-		i.removeBackend(ctx, name)
-
-		return nil
-	}
-
-	// Get current capabilities from the registry
-	capsByType := i.registry.GetCapabilitiesForBackend(name)
-
-	// Track changes for notifications
-	toolsChanged := i.processDisabledTools(name, capsByType, newConfig)
-	promptsChanged := false
-	resourcesChanged := false
-	templatesChanged := false
-
-	// For capabilities that are now enabled but weren't before, we need to
-	// re-initialize the client to get the full list of capabilities
-	needsReinit := !config.CompareCapability(oldConfig.Enable, newConfig.Enable) ||
-		!config.CompareCapability(oldConfig.Disable, newConfig.Disable)
-
-	// Re-initialize if needed
-	if needsReinit {
-		toolsChanged, promptsChanged, resourcesChanged, templatesChanged = i.handleReinitCapabilities(
-			ctx, name, mcpClient, capsByType, newConfig, toolsChanged, promptsChanged, resourcesChanged, templatesChanged,
-		)
-	}
-
-	// Send notifications for changes if needed
-	if toolsChanged {
-		log.Printf("Publishing tools change notification for %s", name)
-		i.sendChangeNotification(ctx, "toolsChange")
-	}
-
-	if promptsChanged {
-		log.Printf("Publishing prompts change notification for %s", name)
-		i.sendChangeNotification(ctx, "promptsChange")
-	}
-
-	if resourcesChanged || templatesChanged {
-		log.Printf("Publishing resources change notification for %s", name)
-		i.sendChangeNotification(ctx, "resourcesChange")
-	}
-
-	return nil
-}
-
-// checkCapabilityChanges checks if a backend has capabilities of specific types.
-func checkCapabilityChanges(capsByType map[string][]string) (bool, bool, bool, bool) {
-	toolsChanged := false
-	promptsChanged := false
-	resourcesChanged := false
-	templatesChanged := false
-
-	if len(capsByType) > 0 {
-		if _, has := capsByType["tool"]; has {
-			toolsChanged = true
-		}
-
-		if _, has := capsByType["prompt"]; has {
-			promptsChanged = true
-		}
-
-		if _, has := capsByType["resource"]; has {
-			resourcesChanged = true
-		}
-
-		if _, has := capsByType["template"]; has {
-			templatesChanged = true
-		}
-	}
-
-	return toolsChanged, promptsChanged, resourcesChanged, templatesChanged
-}
-
-// createDefaultOldConfig creates a default config for comparison purposes.
-func createDefaultOldConfig(name string, newConfig config.Server) config.Server {
-	return config.Server{
-		Name:    name,
-		Type:    newConfig.Type,
-		Command: newConfig.Command,
-		Args:    newConfig.Args,
-		Env:     newConfig.Env,
-		URL:     newConfig.URL,
-		Enable:  &config.Capability{},
-		Disable: &config.Capability{},
-	}
-}
-
-// handleReinitCapabilities handles the re-initialization of capabilities for a backend.
-func (i *Interposer) handleReinitCapabilities(
-	ctx context.Context,
-	name string,
-	mcpClient client.MCPClient,
-	capsByType map[string][]string,
-	newConfig config.Server,
-	toolsChanged, promptsChanged, resourcesChanged, templatesChanged bool,
-) (bool, bool, bool, bool) {
-	log.Printf("Capability configuration changed for backend %s, re-initializing", name)
-
-	// Initialize the client to get capability info
-	initResult, err := Initialize(ctx, mcpClient, i.ImplementationInfo(), name)
-	if err != nil {
-		log.Printf("Warning: failed to re-initialize client: %v", err)
-
-		return toolsChanged, promptsChanged, resourcesChanged, templatesChanged
-	}
-
-	// Process tools if supported
-	if initResult.Capabilities.Tools != nil {
-		toolsChanged = i.handleToolReinit(ctx, name, mcpClient, capsByType, newConfig, toolsChanged)
-	}
-
-	// Process prompts if supported
-	if initResult.Capabilities.Prompts != nil {
-		promptsChanged = i.handlePromptReinit(ctx, name, mcpClient, capsByType, newConfig, promptsChanged)
-	}
-
-	// Process resources if supported
-	if initResult.Capabilities.Resources != nil {
-		resourcesChanged, templatesChanged = i.handleResourceReinit(
-			ctx, name, mcpClient, capsByType, newConfig, resourcesChanged, templatesChanged,
-		)
-	}
-
-	return toolsChanged, promptsChanged, resourcesChanged, templatesChanged
-}
-
-// handleToolReinit processes tools during re-initialization.
-func (i *Interposer) handleToolReinit(
-	ctx context.Context,
-	name string,
-	mcpClient client.MCPClient,
-	capsByType map[string][]string,
-	newConfig config.Server,
-	toolsChanged bool,
-) bool {
-	currentTools := extractRawCapabilityNames(name, capsByType, "tool")
-
-	changed, err := i.processNewTools(ctx, name, mcpClient, currentTools, newConfig)
-	if err != nil {
-		log.Printf("Warning: error processing tools: %v", err)
-	}
-
-	return toolsChanged || changed
-}
-
-// handlePromptReinit processes prompts during re-initialization.
-func (i *Interposer) handlePromptReinit(
-	ctx context.Context,
-	name string,
-	mcpClient client.MCPClient,
-	capsByType map[string][]string,
-	newConfig config.Server,
-	promptsChanged bool,
-) bool {
-	changed, err := i.processNewPrompts(ctx, name, mcpClient, capsByType, newConfig)
-	if err != nil {
-		log.Printf("Warning: error processing prompts: %v", err)
-	}
-
-	return promptsChanged || changed
-}
-
-// handleResourceReinit processes resources and templates during re-initialization.
-func (i *Interposer) handleResourceReinit(
-	ctx context.Context,
-	name string,
-	mcpClient client.MCPClient,
-	capsByType map[string][]string,
-	newConfig config.Server,
-	resourcesChanged, templatesChanged bool,
-) (bool, bool) {
-	// Process resources
-	resChanged, err := i.processNewResources(ctx, name, mcpClient, capsByType, newConfig)
-	if err != nil {
-		log.Printf("Warning: error processing resources: %v", err)
-	}
-
-	// Process resource templates
-	tempChanged, err := i.processNewTemplates(ctx, name, mcpClient, capsByType, newConfig)
-	if err != nil {
-		log.Printf("Warning: error processing resource templates: %v", err)
-	}
-
-	return resourcesChanged || resChanged, templatesChanged || tempChanged
-}
-
-// capabilityChanges tracks changes to different capability types.
-type capabilityChanges struct {
-	toolsChanged     bool
-	promptsChanged   bool
-	resourcesChanged bool
-	templatesChanged bool
-}
-
-// updateChanges updates capability change flags based on new changes.
-func (c *capabilityChanges) updateChanges(tc, pc, rc, tec bool) {
-	c.toolsChanged = c.toolsChanged || tc
-	c.promptsChanged = c.promptsChanged || pc
-	c.resourcesChanged = c.resourcesChanged || rc
-	c.templatesChanged = c.templatesChanged || tec
-}
-
-// getCurrentBackends returns a map of current backend names.
-func (i *Interposer) getCurrentBackends() map[string]bool {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-
-	currentBackends := make(map[string]bool)
-	for name := range i.clients {
-		currentBackends[name] = true
-	}
-
-	return currentBackends
-}
-
-// prepareNewConfigMap creates a map of non-disabled configurations by name.
-func prepareNewConfigMap(serverConfigs []config.Server) map[string]config.Server {
-	newConfigMap := make(map[string]config.Server)
-
-	for _, cfg := range serverConfigs {
-		if !cfg.Disabled() {
-			newConfigMap[cfg.Name] = cfg
-		}
-	}
-
-	return newConfigMap
-}
-
-// processRemovedBackends handles backends that no longer exist in the config.
-func (i *Interposer) processRemovedBackends(
-	ctx context.Context,
-	currentBackends map[string]bool,
-	newConfigMap map[string]config.Server,
-	changes *capabilityChanges,
-) {
-	// Find backends that exist in current but not in new config
-	for name, exists := range currentBackends {
-		if !exists {
-			continue // Skip if already processed
-		}
-
-		// If backend doesn't exist in new config, remove it
-		if _, hasNewConfig := newConfigMap[name]; !hasNewConfig {
-			tc, pc, rc, tec := i.processRemovedBackend(ctx, name)
-			changes.updateChanges(tc, pc, rc, tec)
-
-			// Mark as processed
-			currentBackends[name] = false
-		}
-	}
-}
-
-// processUpdatedBackends handles backends that exist in both current and new configs.
-func (i *Interposer) processUpdatedBackends(
-	ctx context.Context,
-	currentBackends map[string]bool,
-	newConfigMap map[string]config.Server,
-	changes *capabilityChanges,
-) {
-	for name, exists := range currentBackends {
-		if !exists {
-			continue // Skip if already processed
-		}
-
-		newConfig, hasNewConfig := newConfigMap[name]
-		if !hasNewConfig {
-			continue // Skip if not in new config (should be handled by processRemovedBackends)
-		}
-
-		// Verify client still exists
-		clientExists := i.verifyClientExists(name)
-		if !clientExists {
-			log.Printf("Client %s not found in clients map, recreating", name)
-			// Mark for recreation as a new backend
-			currentBackends[name] = false
-
-			continue
-		}
-
-		// Handle existing backend update
-		i.updateExistingBackend(ctx, name, newConfig, changes)
-
-		// Mark as processed
-		currentBackends[name] = false
-
-		delete(newConfigMap, name)
-	}
-}
-
-// verifyClientExists checks if a client exists in the clients map.
-func (i *Interposer) verifyClientExists(name string) bool {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-
-	_, exists := i.clients[name]
-
-	return exists
-}
-
-// updateExistingBackend updates an existing backend with new configuration.
-func (i *Interposer) updateExistingBackend(
-	ctx context.Context,
-	name string,
-	newConfig config.Server,
-	changes *capabilityChanges,
-) {
-	// For now, we always do a full restart since we can't easily
-	// compare all the client parameters
-	oldConfig := createDefaultOldConfig(name, newConfig)
-	needsFullRestart := true
-
-	if needsFullRestart {
-		tc, pc, rc, tec := i.processBackendRestart(ctx, name, newConfig)
-		changes.updateChanges(tc, pc, rc, tec)
-	} else {
-		// Only capability settings have changed
-		tc, pc, rc, tec := i.processCapabilityUpdate(ctx, name, oldConfig, newConfig)
-		changes.updateChanges(tc, pc, rc, tec)
-	}
-}
-
-// processNewBackends handles backends that only exist in the new config.
-func (i *Interposer) processNewBackends(
-	ctx context.Context,
-	newConfigMap map[string]config.Server,
-	changes *capabilityChanges,
-) {
-	for name, config := range newConfigMap {
-		tc, pc, rc, tec := i.processNewBackend(ctx, name, config)
-		changes.updateChanges(tc, pc, rc, tec)
-	}
-}
-
 // sendNotifications sends capability change notifications based on what changed.
 func (i *Interposer) sendNotifications(
 	ctx context.Context,
@@ -889,30 +927,6 @@ func (i *Interposer) processNewBackend(
 	return checkCapabilityChanges(capsByType)
 }
 
-// Reconfigure updates the interposer with a new set of server configurations.
-func (i *Interposer) Reconfigure(ctx context.Context, serverConfigs []config.Server) error {
-	// Collect current backends and prepare new config map
-	currentBackends := i.getCurrentBackends()
-	newConfigMap := prepareNewConfigMap(serverConfigs)
-
-	// Track changes for notifications
-	changes := &capabilityChanges{}
-
-	// Process backends in three phases: removed, updated, and new
-	i.processRemovedBackends(ctx, currentBackends, newConfigMap, changes)
-	i.processUpdatedBackends(ctx, currentBackends, newConfigMap, changes)
-	i.processNewBackends(ctx, newConfigMap, changes)
-
-	// Send notifications for all changes
-	i.sendNotifications(ctx,
-		changes.toolsChanged,
-		changes.promptsChanged,
-		changes.resourcesChanged,
-		changes.templatesChanged)
-
-	return nil
-}
-
 // removeBackend removes a backend client from the interposer.
 func (i *Interposer) removeBackend(ctx context.Context, name string) {
 	// Get and close the client under lock
@@ -939,18 +953,4 @@ func (i *Interposer) removeBackend(ctx context.Context, name string) {
 
 	// Remove capabilities outside the lock
 	i.RemoveTrackedCapabilities(ctx, name)
-}
-
-// Close closes all connections.
-func (i *Interposer) Close() error {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-
-	for name, client := range i.clients {
-		if err := client.Close(); err != nil {
-			log.Printf("Error closing client %s: %v", name, err)
-		}
-	}
-
-	return nil
 }

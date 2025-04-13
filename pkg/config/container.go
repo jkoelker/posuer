@@ -67,6 +67,46 @@ func (c *Container) Clone() *Container {
 	return &clone
 }
 
+// UnmarshalYAML implements the yaml.Unmarshaler interface.
+func (c *Container) UnmarshalYAML(value *yaml.Node) error {
+	unmarshalFunc := func(data any, target any) error {
+		node, ok := data.(*yaml.Node)
+		if !ok {
+			return fmt.Errorf("%w: expected *yaml.Node, got %T", ErrConfigInvalid, data)
+		}
+
+		return node.Decode(target)
+	}
+
+	return c.unmarshal(unmarshalFunc, value)
+}
+
+// UnmarshalJSON implements the json.Unmarshaler interface.
+func (c *Container) UnmarshalJSON(data []byte) error {
+	unmarshalFunc := func(data any, target any) error {
+		bytes, ok := data.([]byte)
+		if !ok {
+			return fmt.Errorf("%w: expected []byte, got %T", ErrConfigInvalid, data)
+		}
+
+		return json.Unmarshal(bytes, target)
+	}
+
+	return c.unmarshal(unmarshalFunc, data)
+}
+
+// IsDisabled returns true if container isolation is explicitly disabled.
+func (c *Container) IsDisabled() bool {
+	return c != nil && c.Image == "" && c.Volumes == nil &&
+		c.Env == nil && c.Network == "" && c.User == "" &&
+		c.WorkDir == "" && c.AdditionalArgs == nil
+}
+
+// IsConfigured returns true if the container has a valid configuration.
+func (c *Container) IsConfigured() bool {
+	return c != nil && c.Image != "" && !c.IsDisabled()
+}
+
 // unmarshal is a helper function to unmarshal the configuration.
 func (c *Container) unmarshal(unmarshalFunc func(data any, target any) error, data any) error {
 	// Try to unmarshal as a boolean
@@ -114,44 +154,4 @@ func (c *Container) unmarshal(unmarshalFunc func(data any, target any) error, da
 	c.AdditionalArgs = container.AdditionalArgs
 
 	return nil
-}
-
-// UnmarshalYAML implements the yaml.Unmarshaler interface.
-func (c *Container) UnmarshalYAML(value *yaml.Node) error {
-	unmarshalFunc := func(data any, target any) error {
-		node, ok := data.(*yaml.Node)
-		if !ok {
-			return fmt.Errorf("%w: expected *yaml.Node, got %T", ErrConfigInvalid, data)
-		}
-
-		return node.Decode(target)
-	}
-
-	return c.unmarshal(unmarshalFunc, value)
-}
-
-// UnmarshalJSON implements the json.Unmarshaler interface.
-func (c *Container) UnmarshalJSON(data []byte) error {
-	unmarshalFunc := func(data any, target any) error {
-		bytes, ok := data.([]byte)
-		if !ok {
-			return fmt.Errorf("%w: expected []byte, got %T", ErrConfigInvalid, data)
-		}
-
-		return json.Unmarshal(bytes, target)
-	}
-
-	return c.unmarshal(unmarshalFunc, data)
-}
-
-// IsDisabled returns true if container isolation is explicitly disabled.
-func (c *Container) IsDisabled() bool {
-	return c != nil && c.Image == "" && c.Volumes == nil &&
-		c.Env == nil && c.Network == "" && c.User == "" &&
-		c.WorkDir == "" && c.AdditionalArgs == nil
-}
-
-// IsConfigured returns true if the container has a valid configuration.
-func (c *Container) IsConfigured() bool {
-	return c != nil && c.Image != "" && !c.IsDisabled()
 }

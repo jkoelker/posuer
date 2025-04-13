@@ -66,6 +66,71 @@ func (cw *Watcher) Start(ctx context.Context) error {
 	return nil
 }
 
+// reloadConfig reloads the configuration and notifies callbacks.
+// OnChange registers a callback to be called when the config file changes.
+func (cw *Watcher) OnChange(callback func([]Server)) {
+	cw.mutex.Lock()
+	defer cw.mutex.Unlock()
+	cw.callbacks = append(cw.callbacks, callback)
+}
+
+// SetDebounceInterval sets the debounce interval for file change events.
+func (cw *Watcher) SetDebounceInterval(interval time.Duration) {
+	cw.mutex.Lock()
+	defer cw.mutex.Unlock()
+	cw.debounceInterval = interval
+}
+
+// Close stops the watcher and releases resources.
+func (cw *Watcher) Close() error {
+	if err := cw.watcher.Close(); err != nil {
+		return fmt.Errorf("failed to close watcher: %w", err)
+	}
+
+	if cw.debounceTimer != nil {
+		cw.debounceTimer.Stop()
+		cw.debounceTimer = nil
+	}
+
+	return nil
+}
+
+// handleConfigChange handles a config file change event with debouncing.
+func (cw *Watcher) handleConfigChange() {
+	cw.mutex.Lock()
+	defer cw.mutex.Unlock()
+
+	// Reset the timer if it exists
+	if cw.debounceTimer != nil {
+		cw.debounceTimer.Stop()
+	}
+
+	// Create a new timer for this event
+	cw.debounceTimer = time.AfterFunc(cw.debounceInterval, func() {
+		cw.reloadConfig()
+	})
+}
+
+func (cw *Watcher) reloadConfig() {
+	log.Printf("Reloading configuration from %s", cw.configPath)
+
+	// Load the updated configuration
+	serverConfigs, err := LoadConfig(cw.configPath)
+	if err != nil {
+		log.Printf("Error reloading configuration: %v", err)
+
+		return
+	}
+
+	// Notify all registered callbacks
+	cw.mutex.RLock()
+	defer cw.mutex.RUnlock()
+
+	for _, callback := range cw.callbacks {
+		callback(serverConfigs)
+	}
+}
+
 // watchLoop is the main event loop for the file watcher.
 func (cw *Watcher) watchLoop(ctx context.Context) {
 	for {
@@ -101,69 +166,4 @@ func (cw *Watcher) watchLoop(ctx context.Context) {
 			return
 		}
 	}
-}
-
-// handleConfigChange handles a config file change event with debouncing.
-func (cw *Watcher) handleConfigChange() {
-	cw.mutex.Lock()
-	defer cw.mutex.Unlock()
-
-	// Reset the timer if it exists
-	if cw.debounceTimer != nil {
-		cw.debounceTimer.Stop()
-	}
-
-	// Create a new timer for this event
-	cw.debounceTimer = time.AfterFunc(cw.debounceInterval, func() {
-		cw.reloadConfig()
-	})
-}
-
-// reloadConfig reloads the configuration and notifies callbacks.
-func (cw *Watcher) reloadConfig() {
-	log.Printf("Reloading configuration from %s", cw.configPath)
-
-	// Load the updated configuration
-	serverConfigs, err := LoadConfig(cw.configPath)
-	if err != nil {
-		log.Printf("Error reloading configuration: %v", err)
-
-		return
-	}
-
-	// Notify all registered callbacks
-	cw.mutex.RLock()
-	defer cw.mutex.RUnlock()
-
-	for _, callback := range cw.callbacks {
-		callback(serverConfigs)
-	}
-}
-
-// OnChange registers a callback to be called when the config file changes.
-func (cw *Watcher) OnChange(callback func([]Server)) {
-	cw.mutex.Lock()
-	defer cw.mutex.Unlock()
-	cw.callbacks = append(cw.callbacks, callback)
-}
-
-// SetDebounceInterval sets the debounce interval for file change events.
-func (cw *Watcher) SetDebounceInterval(interval time.Duration) {
-	cw.mutex.Lock()
-	defer cw.mutex.Unlock()
-	cw.debounceInterval = interval
-}
-
-// Close stops the watcher and releases resources.
-func (cw *Watcher) Close() error {
-	if err := cw.watcher.Close(); err != nil {
-		return fmt.Errorf("failed to close watcher: %w", err)
-	}
-
-	if cw.debounceTimer != nil {
-		cw.debounceTimer.Stop()
-		cw.debounceTimer = nil
-	}
-
-	return nil
 }
