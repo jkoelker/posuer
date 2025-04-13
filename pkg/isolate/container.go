@@ -51,38 +51,6 @@ func NewContainer(options ...func(*Container)) (*Container, error) {
 	return isolator, nil
 }
 
-// detectRuntime returns the available container runtime and its path.
-func (c *Container) detectRuntime() error {
-	var err error
-
-	c.once.Do(func() {
-		if c.runtime != "" {
-			return
-		}
-
-		var path string
-
-		// Check for podman
-		if path, err = exec.LookPath(PodmanRuntime); err == nil {
-			c.runtime = path
-
-			return
-		}
-
-		// Check for docker
-		if path, err = exec.LookPath(DockerRuntime); err == nil {
-			c.runtime = path
-
-			return
-		}
-
-		// No container runtime found
-		err = ErrNoContainerRuntime
-	})
-
-	return err
-}
-
 // Isolate creates an MCP client isolated in a container.
 func (c *Container) Isolate(cfg config.Server) (client.MCPClient, error) {
 	// Skip if already a container command or if Container is nil or explicitly disabled
@@ -121,6 +89,38 @@ func (c *Container) Isolate(cfg config.Server) (client.MCPClient, error) {
 	server.Container = nil
 
 	return NewNoop().Isolate(server)
+}
+
+// detectRuntime returns the available container runtime and its path.
+func (c *Container) detectRuntime() error {
+	var err error
+
+	c.once.Do(func() {
+		if c.runtime != "" {
+			return
+		}
+
+		var path string
+
+		// Check for podman
+		if path, err = exec.LookPath(PodmanRuntime); err == nil {
+			c.runtime = path
+
+			return
+		}
+
+		// Check for docker
+		if path, err = exec.LookPath(DockerRuntime); err == nil {
+			c.runtime = path
+
+			return
+		}
+
+		// No container runtime found
+		err = ErrNoContainerRuntime
+	})
+
+	return err
 }
 
 // IsContainerCommand checks if the command is already a container command.

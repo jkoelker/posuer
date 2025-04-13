@@ -69,6 +69,34 @@ func (c *Capability) HasCapability(capability CapabilityType, name string) bool 
 	return false
 }
 
+// UnmarshalJSON implements the json.Unmarshaler interface.
+func (c *Capability) UnmarshalJSON(data []byte) error {
+	unmarshalFunc := func(data any, target any) error {
+		bytes, ok := data.([]byte)
+		if !ok {
+			return fmt.Errorf("%w: expected []byte, got %T", ErrConfigInvalid, data)
+		}
+
+		return json.Unmarshal(bytes, target)
+	}
+
+	return c.unmarshal(unmarshalFunc, data)
+}
+
+// UnmarshalYAML implements the yaml.Unmarshaler interface.
+func (c *Capability) UnmarshalYAML(value *yaml.Node) error {
+	unmarshalFunc := func(data any, target any) error {
+		node, ok := data.(*yaml.Node)
+		if !ok {
+			return fmt.Errorf("%w: expected *yaml.Node, got %T", ErrConfigInvalid, data)
+		}
+
+		return node.Decode(target)
+	}
+
+	return c.unmarshal(unmarshalFunc, value)
+}
+
 // unmarshalBool attempts to unmarshal data as a boolean.
 // Returns true if successful, false otherwise.
 func (c *Capability) unmarshalBool(
@@ -198,34 +226,6 @@ func (c *Capability) unmarshal(
 
 	// Try to unmarshal as a capability map
 	return c.unmarshalCapMap(unmarshalFunc, data)
-}
-
-// UnmarshalJSON implements the json.Unmarshaler interface.
-func (c *Capability) UnmarshalJSON(data []byte) error {
-	unmarshalFunc := func(data any, target any) error {
-		bytes, ok := data.([]byte)
-		if !ok {
-			return fmt.Errorf("%w: expected []byte, got %T", ErrConfigInvalid, data)
-		}
-
-		return json.Unmarshal(bytes, target)
-	}
-
-	return c.unmarshal(unmarshalFunc, data)
-}
-
-// UnmarshalYAML implements the yaml.Unmarshaler interface.
-func (c *Capability) UnmarshalYAML(value *yaml.Node) error {
-	unmarshalFunc := func(data any, target any) error {
-		node, ok := data.(*yaml.Node)
-		if !ok {
-			return fmt.Errorf("%w: expected *yaml.Node, got %T", ErrConfigInvalid, data)
-		}
-
-		return node.Decode(target)
-	}
-
-	return c.unmarshal(unmarshalFunc, value)
 }
 
 // CompareCapability compares two capability configurations to check if they are equivalent.
