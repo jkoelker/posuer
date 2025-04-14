@@ -4,7 +4,7 @@ go 1.23
 
 require (
 	github.com/fsnotify/fsnotify v1.9.0
-	github.com/mark3labs/mcp-go v0.20.0
+	github.com/mark3labs/mcp-go v0.20.1
 	github.com/stretchr/testify v1.10.0
 	github.com/yosida95/uritemplate/v3 v3.0.2
 	sigs.k8s.io/yaml v1.4.0
